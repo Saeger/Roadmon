@@ -27,6 +27,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileWriter;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -41,15 +44,13 @@ public class MainActivity extends AppCompatActivity {
     private SensorEventListener acelerometerListener;
     private SensorEventListener gyroscopeListener;
     private LocationListener locationListener;
-    private Location lastKnowLocation;
-    private float[] accelerometerValues, movingAverageValues;
+    private float[] accelerometerValues, movingAverageValues, evtValues;
     private boolean allowStoreData = false;
-    private int movingAverageCount = 0, subset = 6, i;
-    File filesFolder, accelerometerFile, gpsFile, gyroFile; //Coloquei global pra poder acessar os arquivos no botão parar
-
+    private boolean gpsFix = false;
+    private int movingAverageCount = 0, subset = 6, verifyFirstValues = 0;
+    private File roadmonFolder, data;
+    private double latitude, longitude;
     private StringBuffer accelerometerSb = new StringBuffer();
-    private StringBuffer gpsSb = new StringBuffer();
-    private StringBuffer gyroSb = new StringBuffer();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -99,31 +100,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 allowStoreData = false;
-                FileWriter writer = null;
-                try {
-                    writer = new FileWriter(accelerometerFile);
-                    writer.append(accelerometerSb.toString());
-                    writer.flush();
-                    writer.close();
-
-                    writer = new FileWriter(gpsFile);
-                    writer.append(gpsSb.toString());
-                    writer.flush();
-                    writer.close();
-
-                    writer = new FileWriter(gyroFile);
-                    writer.append(gyroSb.toString());
-                    writer.flush();
-                    writer.close();
-
-                    Snackbar.make(view, "Gravação finalizada!", Snackbar.LENGTH_LONG)
-                            .setAction("Action", null).show();
-
-                    sendResultsByEmail();
-                } catch (Exception e) {
-                    Snackbar.make(view, "Erro na gravação: " + e.getMessage(), Snackbar.LENGTH_LONG)
-                            .setAction("Action", null).show();
-                }
+                showMessage("Gravação finalizada!");
+                sendResultsByEmail();
             }
         });
 
@@ -147,31 +125,23 @@ public class MainActivity extends AppCompatActivity {
 
         //Testa se a permissão via manifesto foi aceita ou se precisa ser dada explicitamente
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10); //10 é o código representativo(que foi inventado, mudar para variável, caso a implementação seja aceita) para a permissão. Quando a pessoa aceitar, vai para onRequestPermissionsResult
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
         } else {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
-            lastKnowLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-
-            if (lastKnowLocation != null) {
-                TextView.class.cast(findViewById(R.id.txtLat)).setText("Latitude: " + lastKnowLocation.getLatitude());
-                TextView.class.cast(findViewById(R.id.txtLong)).setText("Longitude: " + lastKnowLocation.getLongitude());
-                TextView.class.cast(findViewById(R.id.txtSpeed)).setText("Speed: " + lastKnowLocation.getSpeed());
-                TextView.class.cast(findViewById(R.id.txtGpsTimestamp)).setText("Timestamp: " + System.currentTimeMillis());
-            }
         }
+
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 11);
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 12);
         }
         //File should be on External storage device or created in External storage device
-        filesFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
-        if(!filesFolder.isDirectory()) {
-            filesFolder.mkdirs();
+        roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
+        if(!roadmonFolder.isDirectory()) {
+            roadmonFolder.mkdirs();
         }
-
-        accelerometerFile = new File(filesFolder, "accelerometer.txt");
-        gpsFile = new File(filesFolder, "gps.txt");
-        gyroFile = new File(filesFolder, "gyro.txt");
+        DateFormat df = new SimpleDateFormat("dd_MM_yyyy");
+        String date = df.format(Calendar.getInstance().getTime());
+        data = new File(roadmonFolder, "Leituras_" + date + ".txt");
     }
 
     private void sendResultsByEmail() {
@@ -179,18 +149,11 @@ public class MainActivity extends AppCompatActivity {
         // set the type to 'email'
         emailIntent .setType("vnd.android.cursor.dir/email");
 
-        String to[] = {"matheus_barcellos@hotmail.com"};
+        String to[] = {"matheus_barcellos@hotmail.com", "marcio@marciosaeger.com.br", "jorge@unifacs.br"};
         emailIntent .putExtra(Intent.EXTRA_EMAIL, to);
         // the attachment
-        if (accelerometerFile.length() != 0) {
-            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(accelerometerFile));
-        }
-
-        if (gpsFile.length() != 0) {
-            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(gpsFile));
-        }
-        if (gyroFile.length() != 0) {
-            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(gyroFile));
+        if (data.length() != 0) {
+            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(data));
         }
         // the mail subject
         emailIntent.putExtra(Intent.EXTRA_SUBJECT, "Sensors Result");
@@ -223,14 +186,15 @@ public class MainActivity extends AppCompatActivity {
         return new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent evt) {
-                accelerometerValues = lowPassAccelerometerFilter(evt.values.clone(), accelerometerValues);
-                movingAverageFilter(accelerometerValues);
+                if (gpsFix) {
+                    latitude = 0;
+                    longitude = 0;
+                }
+                applyFilters(evt);
             }
 
             @Override
-            public void onAccuracyChanged(Sensor sensor, int i) {
-
-            }
+            public void onAccuracyChanged(Sensor sensor, int i) {}
         };
     }
 
@@ -239,21 +203,13 @@ public class MainActivity extends AppCompatActivity {
         return new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent evt) {
-                long curTime = System.currentTimeMillis();
-                if (allowStoreData) {
-                    gyroSb.append(evt.values[0] + ","+ evt.values[1] + "," + evt.values[2] + "," + curTime + System.getProperty("line.separator"));
-                }
-
                 TextView.class.cast(findViewById(R.id.txtGyroX)).setText("X-Axis: " + evt.values[0]);
                 TextView.class.cast(findViewById(R.id.txtGyroY)).setText("Y-Axis: " + evt.values[1]);
                 TextView.class.cast(findViewById(R.id.txtGyroZ)).setText("Z-Axis: " + evt.values[2]);
-                TextView.class.cast(findViewById(R.id.txtGyroTimestamp)).setText("Timestamp: " + curTime);
             }
 
             @Override
-            public void onAccuracyChanged(Sensor sensor, int i) {
-
-            }
+            public void onAccuracyChanged(Sensor sensor, int i) {}
         };
     }
 
@@ -261,30 +217,22 @@ public class MainActivity extends AppCompatActivity {
     public LocationListener getLocationListener() {
         return new LocationListener() {
             public void onLocationChanged(Location location) {
-                long curTime = System.currentTimeMillis();
-                if (allowStoreData) {
-                    gpsSb.append(location.getLatitude() + ","+ location.getLongitude() + "," + location.getSpeed() + "," + curTime + System.getProperty("line.separator"));
-                }
-
+                gpsFix = true;
+                latitude = location.getLatitude();
+                longitude = location.getLongitude();
                 TextView.class.cast(findViewById(R.id.txtLat)).setText("Latitude: " + location.getLatitude());
                 TextView.class.cast(findViewById(R.id.txtLong)).setText("Longitude: " + location.getLongitude());
                 TextView.class.cast(findViewById(R.id.txtSpeed)).setText("Speed: " + location.getSpeed());
-                TextView.class.cast(findViewById(R.id.txtGpsTimestamp)).setText("Timestamp: " + curTime);
             }
 
-            public void onStatusChanged(String provider, int status, Bundle extras) {
-            }
+            public void onStatusChanged(String provider, int status, Bundle extras) {}
 
             public void onProviderEnabled(String provider) {
-                Toast.makeText(getBaseContext(), "Provider: " + provider + " ligado!",
-                        Toast.LENGTH_SHORT).show();
+                showMessage("Provider: " + provider + " ligado!");
             }
 
             public void onProviderDisabled(String provider) {
-                //Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
-                //startActivity(intent);
-                Toast.makeText(getBaseContext(), "Provider: " + provider + " desligado!",
-                        Toast.LENGTH_SHORT).show();
+                showMessage("Provider: " + provider + " desligado!");
             }
         };
     }
@@ -294,69 +242,45 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, String permissions[], int[] grantResults) {
         switch (requestCode) {
             case 10: {
-                // If request is cancelled, the result arrays are empty.
                 if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    // permission was granted, yay! Do the
-                    // contacts-related task you need to do.
-
-                    //If desnecessário, porque nós temos certeza que a permissão foi concedida no if superior, mas sem ele dois graves warnings são exibidos.
                     if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                         locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
-                        lastKnowLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
                     }
-
-                    if (lastKnowLocation != null) {
-                        TextView.class.cast(findViewById(R.id.txtLat)).setText("Latitude: " + lastKnowLocation.getLatitude());
-                        TextView.class.cast(findViewById(R.id.txtLong)).setText("Longitude: " + lastKnowLocation.getLongitude());
-                        TextView.class.cast(findViewById(R.id.txtSpeed)).setText("Speed: " + lastKnowLocation.getSpeed());
-                        TextView.class.cast(findViewById(R.id.txtGpsTimestamp)).setText("Timestamp: " + System.currentTimeMillis());
-                    }
-                } else {
-                    // permission denied, boo! Disable the
-                    // functionality that depends on this permission.
                 }
-                return;
             }
-            case 11: { //READ
-                //Do Nothing
-            }
-
-            case 12: { //WRITE
-                //Do Nothing
-            }
-            // other 'case' lines to check for other
-            // permissions this app might request
         }
     }
 
-    //Função para aplicar o Low-Pass filter
-    public float[] lowPassAccelerometerFilter(float[] input, float[] output) {
-        if (output == null) {
-            return input;
-        }
-        for (int i = 0; i < input.length; i++) {
-            output[i] = output[i] + ALPHA * (input[i] - output[i]);
-        }
-        return output;
-    }
+    public void applyFilters(SensorEvent evt) {
+        evtValues = evt.values.clone();
 
-    public void movingAverageFilter(float[] evt) {
+        //Low-pass filter
+        if (verifyFirstValues != 0){
+            for (int i = 0; i < evtValues.length; i++) {
+                accelerometerValues[i] = accelerometerValues[i] + ALPHA * (evtValues[i] - accelerometerValues[i]);
+            }
+        } else {
+            verifyFirstValues = 1;
+            accelerometerValues = evtValues;
+        }
+
+        //Moving Average filter
         if (movingAverageCount == 0) {
             movingAverageCount++;
-            movingAverageValues[0] = evt[0];
-            movingAverageValues[1] = evt[1];
-            movingAverageValues[2] = evt[2];
+            movingAverageValues[0] = accelerometerValues[0];
+            movingAverageValues[1] = accelerometerValues[1];
+            movingAverageValues[2] = accelerometerValues[2];
         }
         else if (movingAverageCount < subset) {
             movingAverageCount++;
-            movingAverageValues[0] += evt[0];
-            movingAverageValues[1] += evt[1];
-            movingAverageValues[2] += evt[2];
+            movingAverageValues[0] += accelerometerValues[0];
+            movingAverageValues[1] += accelerometerValues[1];
+            movingAverageValues[2] += accelerometerValues[2];
         }else {
             movingAverageCount = 0;
-            movingAverageValues[0] = movingAverageValues[0] / 6;
-            movingAverageValues[1] = movingAverageValues[1] / 6;
-            movingAverageValues[2] = movingAverageValues[2] / 6;
+            movingAverageValues[0] = movingAverageValues[0] / subset;
+            movingAverageValues[1] = movingAverageValues[1] / subset;
+            movingAverageValues[2] = movingAverageValues[2] / subset;
             updateAccelerometerFields(movingAverageValues);
         }
     }
@@ -364,28 +288,32 @@ public class MainActivity extends AppCompatActivity {
     // Função para atualizar os campos do acelerometro
     public void updateAccelerometerFields(float[] values) {
         long curTime = System.currentTimeMillis();
-        /*if (allowStoreData) {
-            accelerometerSb.append(evt.values[0] + ","+ evt.values[1] + "," + evt.values[2] + "," + curTime + System.getProperty("line.separator"));
-        }*/
+
         if (allowStoreData) {
-            accelerometerSb.append(values[0] + ","+ values[1] + "," + values[2] + "," + curTime + System.getProperty("line.separator"));
+            accelerometerSb.append(values[0] + ", "+ values[1] + ", " + values[2] + ", " + latitude + ", " + longitude + ", " + curTime + System.getProperty("line.separator"));
+            latitude = 0d;
+            longitude = 0d;
+            writeFile(data, accelerometerSb);
         }
 
         TextView.class.cast(findViewById(R.id.txtAcelerometroX)).setText("X: " + values[0]);
         TextView.class.cast(findViewById(R.id.txtAcelerometroY)).setText("Y: " + values[1]);
         TextView.class.cast(findViewById(R.id.txtAcelerometroZ)).setText("Z: " + values[2]);
         TextView.class.cast(findViewById(R.id.txtAcelerometroTimestamp)).setText("Timestamp: " + curTime);
+    }
 
-        /*TextView.class.cast(findViewById(R.id.txtAcelerometroX)).setText("X: " + evt.values[0]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroY)).setText("Y: " + evt.values[1]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroZ)).setText("Z: " + evt.values[2]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroTimestamp)).setText("Timestamp: " + curTime);*/
+    //escreve no arquivo
+    public void writeFile(File file, StringBuffer buffer ) {
+        try {
+            FileWriter writer = new FileWriter(file);
+            writer.append(buffer.toString());
+            writer.flush();
+            writer.close();
+        } catch (Exception e) {}
+    }
 
-        //Deixei comentado seu filtro porque estava me atrapalhando na visualização dos resultados.
-        /*accelerometerValues = lowPassAccelerometerFilter(event.values.clone(), accelerometerValues);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroX)).setText("X: " + accelerometerValues[0]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroY)).setText("Y: " + accelerometerValues[1]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroZ)).setText("Z: " + accelerometerValues[2]);
-        TextView.class.cast(findViewById(R.id.txtAcelerometroTimestamp)).setText("Timestamp: " + System.currentTimeMillis());*/
+    //Exibe toast
+    public void showMessage(String message){
+        Toast.makeText(getBaseContext(), message, Toast.LENGTH_SHORT).show();
     }
 }
