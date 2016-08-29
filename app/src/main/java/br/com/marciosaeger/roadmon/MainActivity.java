@@ -27,6 +27,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileWriter;
+import java.io.IOException;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -48,10 +49,11 @@ public class MainActivity extends AppCompatActivity {
     private boolean allowStoreData = false;
     private boolean gpsFix = false;
     private int movingAverageCount = 0, subset = 6, verifyFirstValues = 0;
-    private File roadmonFolder, data;
+    private File roadmonFolder, roadmonFile;
     private double latitude, longitude;
     private StringBuffer accelerometerSb = new StringBuffer();
-
+    private String line=null;
+    private FileWriter writer;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -89,6 +91,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 allowStoreData = true;
+                // centraliza todas as operações para abertura do arquivo de saída
+                openFile();
                 Snackbar.make(view, "Gravação iniciada!", Snackbar.LENGTH_LONG)
                         .setAction("Action", null).show();
             }
@@ -100,6 +104,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 allowStoreData = false;
+                closeFile();
                 showMessage("Gravação finalizada!");
                 sendResultsByEmail();
             }
@@ -134,6 +139,7 @@ public class MainActivity extends AppCompatActivity {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 11);
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 12);
         }
+/*
         //File should be on External storage device or created in External storage device
         roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
         if(!roadmonFolder.isDirectory()) {
@@ -141,7 +147,9 @@ public class MainActivity extends AppCompatActivity {
         }
         DateFormat df = new SimpleDateFormat("dd_MM_yyyy");
         String date = df.format(Calendar.getInstance().getTime());
-        data = new File(roadmonFolder, "Leituras_" + date + ".txt");
+        roadmonFile = new File(roadmonFolder, "Leituras_" + date + ".txt");
+*/
+
     }
 
     private void sendResultsByEmail() {
@@ -152,8 +160,8 @@ public class MainActivity extends AppCompatActivity {
         String to[] = {"matheus_barcellos@hotmail.com", "marcio@marciosaeger.com.br", "jorge@unifacs.br"};
         emailIntent .putExtra(Intent.EXTRA_EMAIL, to);
         // the attachment
-        if (data.length() != 0) {
-            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(data));
+        if (roadmonFile.length() != 0) {
+            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(roadmonFile));
         }
         // the mail subject
         emailIntent.putExtra(Intent.EXTRA_SUBJECT, "Sensors Result");
@@ -186,10 +194,11 @@ public class MainActivity extends AppCompatActivity {
         return new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent evt) {
-                if (gpsFix) {
-                    latitude = 0;
-                    longitude = 0;
-                }
+// Este código faz com que latitude e longitude sejam sempre 0 no arquivo
+//                if (gpsFix) {
+//                    latitude = 0;
+//                    longitude = 0;
+//                }
                 applyFilters(evt);
             }
 
@@ -290,10 +299,14 @@ public class MainActivity extends AppCompatActivity {
         long curTime = System.currentTimeMillis();
 
         if (allowStoreData) {
-            accelerometerSb.append(values[0] + ", "+ values[1] + ", " + values[2] + ", " + latitude + ", " + longitude + ", " + curTime + System.getProperty("line.separator"));
-            latitude = 0d;
-            longitude = 0d;
-            writeFile(data, accelerometerSb);
+            // verifica se possui um fix do GPS
+            if (gpsFix) {
+                // se já possui um coord, imprime a linha no arquivo
+                String line=values[0]+";"+values[1]+";"+values[2]+";"+curTime+";"+latitude+";"+longitude+System.getProperty("line.separator");
+                writeInOpenFile(line);
+                latitude = 0d;
+                longitude = 0d;
+            }
         }
 
         TextView.class.cast(findViewById(R.id.txtAcelerometroX)).setText("X: " + values[0]);
@@ -302,16 +315,38 @@ public class MainActivity extends AppCompatActivity {
         TextView.class.cast(findViewById(R.id.txtAcelerometroTimestamp)).setText("Timestamp: " + curTime);
     }
 
-    //escreve no arquivo
-    public void writeFile(File file, StringBuffer buffer ) {
+    // abre o arquivo
+    public void openFile() {
+        //File should be on External storage device or created in External storage device
+        // Cria ou abre pasta da aplicação na área de armazenamento externa
+        roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
+        if(!roadmonFolder.isDirectory()) {
+            roadmonFolder.mkdirs();
+        }
+        DateFormat df = new SimpleDateFormat("yyyy.MM.dd G 'at' HH:mm:ss z");
+        String date = df.format(Calendar.getInstance().getTime());
+        roadmonFile = new File(roadmonFolder, "RoadMon Readings" + date + ".txt");
         try {
-            FileWriter writer = new FileWriter(file);
-            writer.append(buffer.toString());
-            writer.flush();
-            writer.close();
-        } catch (Exception e) {}
+            writer = new FileWriter(roadmonFile);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
-
+    public void writeInOpenFile(String line) {
+        try {
+            writer.append(line);
+            writer.flush();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+    public void closeFile() {
+        try {
+            writer.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
     //Exibe toast
     public void showMessage(String message){
         Toast.makeText(getBaseContext(), message, Toast.LENGTH_SHORT).show();
