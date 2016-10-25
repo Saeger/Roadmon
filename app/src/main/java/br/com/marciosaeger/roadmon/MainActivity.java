@@ -3,6 +3,7 @@ package br.com.marciosaeger.roadmon;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.hardware.Camera;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -10,6 +11,7 @@ import android.hardware.SensorManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -18,9 +20,11 @@ import android.support.design.widget.Snackbar;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.Toolbar;
+import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.Button;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.TextView;
@@ -31,11 +35,16 @@ import java.io.IOException;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
+import java.util.Date;
+
+import android.content.Context;
+import android.media.CamcorderProfile;
+import android.view.SurfaceView;
+import android.widget.FrameLayout;
 
 public class MainActivity extends AppCompatActivity {
 
     public static int DEFINED_DELAY = SensorManager.SENSOR_DELAY_NORMAL;
-
     public static final float ALPHA = 0.2f;
 
     private SensorManager senSensorManager;
@@ -49,11 +58,17 @@ public class MainActivity extends AppCompatActivity {
     private boolean allowStoreData = false;
     private boolean gpsFix = false;
     private int movingAverageCount = 0, subset = 6, verifyFirstValues = 0;
-    private File roadmonFolder, roadmonFile;
+    private File roadmonFolder, data;
     private double latitude, longitude;
     private StringBuffer accelerometerSb = new StringBuffer();
-    private String line=null;
-    private FileWriter writer;
+    private String date;
+
+    //Camera
+    private Camera myCamera;
+    private MyCameraSurfaceView myCameraSurfaceView;
+    private MediaRecorder mediaRecorder;
+    boolean recording;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -61,6 +76,26 @@ public class MainActivity extends AppCompatActivity {
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
+        //Pasta de arquivos e Arquivo de Leituras
+        roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
+        if (!roadmonFolder.isDirectory()) {
+            roadmonFolder.mkdirs();
+        }
+        DateFormat df = new SimpleDateFormat("dd_MM_yyyy");
+        date = df.format(Calendar.getInstance().getTime());
+        data = new File(roadmonFolder, "Leituras_" + date + ".txt");
+
+        //Camera
+        recording = false;
+        myCamera = getCameraInstance();
+        if(myCamera == null){
+            showMessage("Fail to get Camera");
+        }
+        myCameraSurfaceView = new MyCameraSurfaceView(this, myCamera);
+        FrameLayout myCameraPreview = (FrameLayout)findViewById(R.id.videoview);
+        myCameraPreview.addView(myCameraSurfaceView);
+
+        //Vetor do filtro
         movingAverageValues = new float[3];
 
         //Configurações do RadioGroup de Frequencia
@@ -90,11 +125,21 @@ public class MainActivity extends AppCompatActivity {
         btnRecord.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                allowStoreData = true;
-                // centraliza todas as operações para abertura do arquivo de saída
-                openFile();
-                Snackbar.make(view, "Gravação iniciada!", Snackbar.LENGTH_LONG)
-                        .setAction("Action", null).show();
+                if (recording == false) {
+                    allowStoreData = true;
+
+                    //Release Camera before MediaRecorder start
+                    releaseCamera();
+                    if (!prepareMediaRecorder()) {
+                        showMessage("Fail in prepareMediaRecorder()!\n - Ended -");
+                        finish();
+                    }
+                    mediaRecorder.start();
+                    recording = true;
+
+                    Snackbar.make(view, "Gravação iniciada!", Snackbar.LENGTH_LONG)
+                            .setAction("Action", null).show();
+                }
             }
         });
 
@@ -103,10 +148,20 @@ public class MainActivity extends AppCompatActivity {
         btnStop.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                allowStoreData = false;
-                closeFile();
-                showMessage("Gravação finalizada!");
-                sendResultsByEmail();
+                if (recording == true) {
+                    allowStoreData = false;
+
+                    // stop recording and release camera
+                    mediaRecorder.stop();  // stop the recording
+                    releaseMediaRecorder(); // release the MediaRecorder object
+
+                    //Exit after saved
+                    //finish();
+                    recording = false;
+
+                    showMessage("Gravação finalizada!");
+                    sendResultsByEmail();
+                }
             }
         });
 
@@ -128,45 +183,38 @@ public class MainActivity extends AppCompatActivity {
         // Define a listener that responds to location updates
         locationListener = getLocationListener();
 
-        //Testa se a permissão via manifesto foi aceita ou se precisa ser dada explicitamente
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
+        //Permissões
+        if ((ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+                || (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+                || (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+                || (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                || (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.ACCESS_FINE_LOCATION}, 11);
         } else {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
         }
-
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 11);
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 12);
-        }
-/*
-        //File should be on External storage device or created in External storage device
-        roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
-        if(!roadmonFolder.isDirectory()) {
-            roadmonFolder.mkdirs();
-        }
-        DateFormat df = new SimpleDateFormat("dd_MM_yyyy");
-        String date = df.format(Calendar.getInstance().getTime());
-        roadmonFile = new File(roadmonFolder, "Leituras_" + date + ".txt");
-*/
-
     }
 
     private void sendResultsByEmail() {
         Intent emailIntent = new Intent(Intent.ACTION_SEND);
         // set the type to 'email'
-        emailIntent .setType("vnd.android.cursor.dir/email");
+        emailIntent.setType("vnd.android.cursor.dir/email");
 
         String to[] = {"matheus_barcellos@hotmail.com", "marcio@marciosaeger.com.br", "jorge@unifacs.br"};
-        emailIntent .putExtra(Intent.EXTRA_EMAIL, to);
+        emailIntent.putExtra(Intent.EXTRA_EMAIL, to);
         // the attachment
-        if (roadmonFile.length() != 0) {
-            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(roadmonFile));
+        if (data.length() != 0) {
+            emailIntent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(data));
         }
         // the mail subject
         emailIntent.putExtra(Intent.EXTRA_SUBJECT, "Sensors Result");
 
-        startActivity(Intent.createChooser(emailIntent , "Send email..."));
+        startActivity(Intent.createChooser(emailIntent, "Send email..."));
     }
 
     @Override
@@ -194,16 +242,16 @@ public class MainActivity extends AppCompatActivity {
         return new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent evt) {
-// Este código faz com que latitude e longitude sejam sempre 0 no arquivo
-//                if (gpsFix) {
-//                    latitude = 0;
-//                    longitude = 0;
-//                }
+                if (gpsFix) {
+                    latitude = 0;
+                    longitude = 0;
+                }
                 applyFilters(evt);
             }
 
             @Override
-            public void onAccuracyChanged(Sensor sensor, int i) {}
+            public void onAccuracyChanged(Sensor sensor, int i) {
+            }
         };
     }
 
@@ -218,7 +266,8 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onAccuracyChanged(Sensor sensor, int i) {}
+            public void onAccuracyChanged(Sensor sensor, int i) {
+            }
         };
     }
 
@@ -234,7 +283,8 @@ public class MainActivity extends AppCompatActivity {
                 TextView.class.cast(findViewById(R.id.txtSpeed)).setText("Speed: " + location.getSpeed());
             }
 
-            public void onStatusChanged(String provider, int status, Bundle extras) {}
+            public void onStatusChanged(String provider, int status, Bundle extras) {
+            }
 
             public void onProviderEnabled(String provider) {
                 showMessage("Provider: " + provider + " ligado!");
@@ -264,7 +314,7 @@ public class MainActivity extends AppCompatActivity {
         evtValues = evt.values.clone();
 
         //Low-pass filter
-        if (verifyFirstValues != 0){
+        if (verifyFirstValues != 0) {
             for (int i = 0; i < evtValues.length; i++) {
                 accelerometerValues[i] = accelerometerValues[i] + ALPHA * (evtValues[i] - accelerometerValues[i]);
             }
@@ -279,13 +329,12 @@ public class MainActivity extends AppCompatActivity {
             movingAverageValues[0] = accelerometerValues[0];
             movingAverageValues[1] = accelerometerValues[1];
             movingAverageValues[2] = accelerometerValues[2];
-        }
-        else if (movingAverageCount < subset) {
+        } else if (movingAverageCount < subset) {
             movingAverageCount++;
             movingAverageValues[0] += accelerometerValues[0];
             movingAverageValues[1] += accelerometerValues[1];
             movingAverageValues[2] += accelerometerValues[2];
-        }else {
+        } else {
             movingAverageCount = 0;
             movingAverageValues[0] = movingAverageValues[0] / subset;
             movingAverageValues[1] = movingAverageValues[1] / subset;
@@ -299,14 +348,10 @@ public class MainActivity extends AppCompatActivity {
         long curTime = System.currentTimeMillis();
 
         if (allowStoreData) {
-            // verifica se possui um fix do GPS
-            if (gpsFix) {
-                // se já possui um coord, imprime a linha no arquivo
-                String line=values[0]+";"+values[1]+";"+values[2]+";"+curTime+";"+latitude+";"+longitude+System.getProperty("line.separator");
-                writeInOpenFile(line);
-                latitude = 0d;
-                longitude = 0d;
-            }
+            accelerometerSb.append(values[0] + ", " + values[1] + ", " + values[2] + ", " + latitude + ", " + longitude + ", " + curTime + System.getProperty("line.separator"));
+            latitude = 0d;
+            longitude = 0d;
+            writeFile(data, accelerometerSb);
         }
 
         TextView.class.cast(findViewById(R.id.txtAcelerometroX)).setText("X: " + values[0]);
@@ -315,40 +360,81 @@ public class MainActivity extends AppCompatActivity {
         TextView.class.cast(findViewById(R.id.txtAcelerometroTimestamp)).setText("Timestamp: " + curTime);
     }
 
-    // abre o arquivo
-    public void openFile() {
-        //File should be on External storage device or created in External storage device
-        // Cria ou abre pasta da aplicação na área de armazenamento externa
-        roadmonFolder = new File(Environment.getExternalStorageDirectory(), "RoadmonFiles");
-        if(!roadmonFolder.isDirectory()) {
-            roadmonFolder.mkdirs();
-        }
-        DateFormat df = new SimpleDateFormat("yyyy.MM.dd G 'at' HH:mm:ss z");
-        String date = df.format(Calendar.getInstance().getTime());
-        roadmonFile = new File(roadmonFolder, "RoadMon Readings" + date + ".txt");
+    //escreve no arquivo
+    public void writeFile(File file, StringBuffer buffer) {
         try {
-            writer = new FileWriter(roadmonFile);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-    public void writeInOpenFile(String line) {
-        try {
-            writer.append(line);
+            FileWriter writer = new FileWriter(file);
+            writer.append(buffer.toString());
             writer.flush();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-    public void closeFile() {
-        try {
             writer.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+        } catch (Exception e) {
         }
     }
+
     //Exibe toast
-    public void showMessage(String message){
-        Toast.makeText(getBaseContext(), message, Toast.LENGTH_SHORT).show();
+    public void showMessage(String message) {
+        Toast.makeText(getBaseContext(), message, Toast.LENGTH_LONG).show();
+    }
+
+    private Camera getCameraInstance(){
+        // TODO Auto-generated method stub
+        Camera c = null;
+        try {
+            c = Camera.open(); // attempt to get a Camera instance
+        }
+        catch (Exception e){
+            // Camera is not available (in use or does not exist)
+        }
+        return c; // returns null if camera is unavailable
+    }
+
+    private boolean prepareMediaRecorder(){
+        myCamera = getCameraInstance();
+        myCamera.setDisplayOrientation(90);
+        myCamera.unlock();
+        mediaRecorder = new MediaRecorder();
+        mediaRecorder.setCamera(myCamera);
+        mediaRecorder.setOrientationHint(90);
+        mediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
+        mediaRecorder.setVideoSource(MediaRecorder.VideoSource.CAMERA);
+        mediaRecorder.setProfile(CamcorderProfile.get(CamcorderProfile.QUALITY_480P));
+        mediaRecorder.setOutputFile(roadmonFolder.getPath() + "/" + date + ".mp4");
+        mediaRecorder.setMaxDuration(60000); // Set max duration 60 sec.
+        mediaRecorder.setMaxFileSize(50000000); // Set max file size 50M
+        mediaRecorder.setPreviewDisplay(myCameraSurfaceView.getHolder().getSurface());
+
+        try {
+            mediaRecorder.prepare();
+        } catch (IllegalStateException e) {
+            releaseMediaRecorder();
+            return false;
+        } catch (IOException e) {
+            releaseMediaRecorder();
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        releaseMediaRecorder();       // if you are using MediaRecorder, release it first
+        releaseCamera();              // release the camera immediately on pause event
+    }
+
+    private void releaseMediaRecorder(){
+        if (mediaRecorder != null) {
+            mediaRecorder.reset();   // clear recorder configuration
+            mediaRecorder.release(); // release the recorder object
+            mediaRecorder = new MediaRecorder();
+            myCamera.lock();           // lock camera for later use
+        }
+    }
+
+    private void releaseCamera(){
+        if (myCamera != null){
+            myCamera.release();        // release the camera for other applications
+            myCamera = null;
+        }
     }
 }
